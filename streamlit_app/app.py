@@ -407,6 +407,12 @@ def configure_page() -> None:
         .conf-high   { color: #3fb950 !important; font-weight: 700; }
         .conf-medium { color: #e3b341 !important; font-weight: 700; }
         .conf-low    { color: #ff7b72 !important; font-weight: 700; }
+
+        /* ── Hide Streamlit chrome ────────────────────────────── */
+        #MainMenu { visibility: hidden; }
+        footer { visibility: hidden; }
+        header[data-testid="stHeader"] { background: transparent; }
+        div[data-testid="stToolbar"] { display: none; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -509,6 +515,118 @@ def render_pipeline_results() -> None:
                 st.code(result["stderr"], language="text")
 
 
+def _run_pipeline_with_progress(selected_repo: dict[str, Any]) -> None:
+    """Run the pipeline stage-by-stage with a live progress UI in the main area."""
+    import importlib.util as _ilu
+
+    _get_runner.clear()
+    runner = _get_runner()
+
+    repo_name = selected_repo["name"]
+    slug = repo_slug(repo_name)
+    repo_output = repo_root() / "output" / "repos" / slug
+    src_dir = repo_output / "src"
+    source_type = selected_repo.get("source_type", "go")
+
+    # Load inner skill modules directly so we can call with callbacks
+    _root = repo_root()
+    _skills = _root / "skills"
+
+    def _load(path, name):
+        spec = _ilu.spec_from_file_location(name, path)
+        mod = _ilu.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    repo_config = runner.get_repo_by_name(repo_name)
+    if not repo_config:
+        st.error(f"Repo '{repo_name}' not found in repos.yaml")
+        return
+
+    with st.status(f"Running pipeline for **{repo_name}**", expanded=True) as status:
+
+        # ── Stage 1: Fetch ────────────────────────────────────────
+        st.write("📥 **Stage 1 / 4** — Fetching source files from GitLab…")
+        try:
+            file_count = runner.fetch_repo(repo_config, src_dir)
+            st.write(f"   ✓ Downloaded **{file_count}** source files")
+        except Exception as exc:
+            status.update(label="Pipeline failed at Fetch", state="error")
+            st.error(f"Fetch failed: {exc}")
+            return
+
+        # ── Stage 2: Ingest ───────────────────────────────────────
+        st.write("🔍 **Stage 2 / 4** — Parsing API endpoints…")
+        try:
+            ingest_payload = runner.run_ingest(src_dir, source_type)
+            ep_count = ingest_payload["metadata"]["total_endpoints"]
+            st_count = ingest_payload["metadata"]["total_structs"]
+            # Write ingest.json
+            import json as _json
+            out_ingest = repo_output / "ingest.json"
+            out_ingest.parent.mkdir(parents=True, exist_ok=True)
+            out_ingest.write_text(_json.dumps(ingest_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            st.write(f"   ✓ Found **{ep_count}** endpoints and **{st_count}** structs")
+        except Exception as exc:
+            status.update(label="Pipeline failed at Ingest", state="error")
+            st.error(f"Ingest failed: {exc}")
+            return
+
+        # ── Stage 3: Generate docs ────────────────────────────────
+        st.write(f"🤖 **Stage 3 / 4** — Generating AI documentation for {ep_count} endpoints…")
+        prog_bar = st.progress(0.0, text="Starting AI generation…")
+        prog_label = st.empty()
+
+        def _on_progress(current, total, path):
+            frac = current / total if total else 1.0
+            prog_bar.progress(frac, text=f"Documented {current} / {total}")
+            prog_label.caption(f"Last: `{path}`")
+
+        try:
+            doc_gen = _load(_skills / "doc_generator" / "main.py", "_pg_doc_gen")
+            docs_payload = doc_gen.generate_docs(ingest_payload, progress_callback=_on_progress)
+            prog_bar.progress(1.0, text="AI generation complete")
+            prog_label.empty()
+
+            # Write outputs
+            out_json = repo_output / "generated_docs.json"
+            out_md = repo_output / "generated_docs.md"
+            out_json.write_text(_json.dumps(docs_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            out_md.write_text(doc_gen._render_full_markdown(docs_payload), encoding="utf-8")
+            docs_count = docs_payload["metadata"]["generated_endpoints"]
+            st.write(f"   ✓ AI docs generated for **{docs_count}** endpoints")
+        except Exception as exc:
+            status.update(label="Pipeline failed at Doc Generation", state="error")
+            st.error(f"Doc generation failed: {exc}")
+            return
+
+        # ── Stage 4: Drift detection ──────────────────────────────
+        st.write("🔎 **Stage 4 / 4** — Running drift detection…")
+        try:
+            drift = _load(_skills / "drift_detector" / "main.py", "_pg_drift")
+            stale_path = src_dir / "docs" / "stale_docs.md"
+            drift.run_drift_detection(
+                generated_docs_path=repo_output / "generated_docs.json",
+                stale_docs_path=stale_path if stale_path.exists() else None,
+                output_dir=repo_output,
+            )
+            st.write("   ✓ Drift detection complete")
+        except Exception as exc:
+            st.warning(f"Drift detection skipped: {exc}")
+
+        status.update(
+            label=f"Pipeline complete — {docs_count} endpoints documented, {ep_count - docs_count} skipped",
+            state="complete",
+        )
+
+    # Refresh dashboard
+    load_json.clear()
+    load_text.clear()
+    st.session_state["_active_slug"] = slug
+    st.rerun()
+
+
 def render_pipeline_controls(selected_repo: dict[str, Any] | None) -> None:
     """Render Run Pipeline button for the currently selected repo."""
     if not selected_repo:
@@ -522,25 +640,7 @@ def render_pipeline_controls(selected_repo: dict[str, Any] | None) -> None:
         st.sidebar.caption(desc)
 
     if st.sidebar.button("Run Pipeline", type="primary", use_container_width=True):
-        with st.spinner(f"Running pipeline for {selected_repo['name']}..."):
-            try:
-                _get_runner.clear()  # force fresh module load on each run
-                runner = _get_runner()
-                result = runner.run_by_name(selected_repo["name"])
-                if result.get("status") == "OK":
-                    st.sidebar.success(
-                        f"Done — {result.get('docs_generated', 0)} endpoints documented."
-                    )
-                    load_json.clear()
-                    load_text.clear()
-                    st.session_state["_active_slug"] = repo_slug(selected_repo["name"])
-                    st.rerun()
-                else:
-                    st.sidebar.error(
-                        f"Failed at {result.get('stage', '?')}: {result.get('error', 'unknown')}"
-                    )
-            except Exception as exc:
-                st.sidebar.error(f"Pipeline error: {exc}")
+        _run_pipeline_with_progress(selected_repo)
 
 
 def render_sidebar(repos: list[dict[str, Any]]) -> tuple[str, str | None]:
