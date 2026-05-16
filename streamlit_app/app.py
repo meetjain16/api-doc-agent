@@ -55,7 +55,7 @@ def repo_slug(name: str) -> str:
 @st.cache_resource(show_spinner=False)
 def _get_runner() -> Any:
     """Load the pipeline runner module once and cache it for the session."""
-    runner_path = repo_root() / "skills" / "pipeline" / "runner.py"
+    runner_path = repo_root() / "skills" / "pipeline" / "scripts" / "runner.py"
     spec = importlib.util.spec_from_file_location("_api_docagent_runner", runner_path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules["_api_docagent_runner"] = mod
@@ -449,9 +449,9 @@ def pipeline_commands() -> list[tuple[str, list[str]]]:
     root = repo_root()
     python = sys.executable
     return [
-        ("Step 1 — Parse Go source", [python, str(root / "skills" / "doc_ingestor" / "main.py")]),
-        ("Step 2 — Generate AI docs", [python, str(root / "skills" / "doc_generator" / "main.py")]),
-        ("Step 3 — Detect drift", [python, str(root / "skills" / "drift_detector" / "main.py")]),
+        ("Step 1 — Parse Go source", [python, str(root / "skills" / "doc_ingestor" / "scripts" / "main.py")]),
+        ("Step 2 — Generate AI docs", [python, str(root / "skills" / "doc_generator" / "scripts" / "main.py")]),
+        ("Step 3 — Detect drift", [python, str(root / "skills" / "drift_detector" / "scripts" / "main.py")]),
     ]
 
 
@@ -532,6 +532,12 @@ def _run_pipeline_with_progress(selected_repo: dict[str, Any]) -> None:
     _root = repo_root()
     _skills = _root / "skills"
 
+    # Ensure scripts/ dirs are on sys.path for intra-skill imports
+    for _skill in ("doc_ingestor", "doc_generator", "drift_detector"):
+        _p = str(_skills / _skill / "scripts")
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+
     def _load(path, name):
         spec = _ilu.spec_from_file_location(name, path)
         mod = _ilu.module_from_spec(spec)
@@ -584,7 +590,7 @@ def _run_pipeline_with_progress(selected_repo: dict[str, Any]) -> None:
             prog_label.caption(f"Last: `{path}`")
 
         try:
-            doc_gen = _load(_skills / "doc_generator" / "main.py", "_pg_doc_gen")
+            doc_gen = _load(_skills / "doc_generator" / "scripts" / "main.py", "_pg_doc_gen")
             docs_payload = doc_gen.generate_docs(ingest_payload, progress_callback=_on_progress)
             prog_bar.progress(1.0, text="AI generation complete")
             prog_label.empty()
@@ -604,7 +610,7 @@ def _run_pipeline_with_progress(selected_repo: dict[str, Any]) -> None:
         # ── Stage 4: Drift detection ──────────────────────────────
         st.write("🔎 **Stage 4 / 4** — Running drift detection…")
         try:
-            drift = _load(_skills / "drift_detector" / "main.py", "_pg_drift")
+            drift = _load(_skills / "drift_detector" / "scripts" / "main.py", "_pg_drift")
             stale_path = src_dir / "docs" / "stale_docs.md"
             drift.run_drift_detection(
                 generated_docs_path=repo_output / "generated_docs.json",

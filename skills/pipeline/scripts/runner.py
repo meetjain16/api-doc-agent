@@ -23,7 +23,7 @@ import yaml
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
-_ROOT = Path(__file__).resolve().parents[2]
+_ROOT = Path(__file__).resolve().parents[3]
 _SKILLS = _ROOT / "skills"
 
 # ---------------------------------------------------------------------------
@@ -47,17 +47,17 @@ def _load_mod(file_path: Path, unique_name: str, force_reload: bool = False) -> 
     return mod
 
 
-# Add skill dirs to sys.path so relative-import fallbacks work inside each module
-_ensure_path(str(_SKILLS / "doc_ingestor"))
-_ensure_path(str(_SKILLS / "doc_generator"))
-_ensure_path(str(_SKILLS / "drift_detector"))
+# Add skill scripts/ dirs to sys.path so relative-import fallbacks work inside each module
+_ensure_path(str(_SKILLS / "doc_ingestor" / "scripts"))
+_ensure_path(str(_SKILLS / "doc_generator" / "scripts"))
+_ensure_path(str(_SKILLS / "drift_detector" / "scripts"))
 
 # Load skill modules with unique names to avoid conflicts
-_go_parser = _load_mod(_SKILLS / "doc_ingestor" / "parser.py", "_docagent_go_parser")
+_go_parser = _load_mod(_SKILLS / "doc_ingestor" / "scripts" / "parser.py", "_docagent_go_parser")
 # Always reload the FastAPI parser so code changes take effect without server restart
-_fp_parser = _load_mod(_SKILLS / "doc_ingestor" / "fastapi_parser.py", "_docagent_fp_parser", force_reload=True)
-_doc_gen = _load_mod(_SKILLS / "doc_generator" / "main.py", "_docagent_doc_gen")
-_drift = _load_mod(_SKILLS / "drift_detector" / "main.py", "_docagent_drift")
+_fp_parser = _load_mod(_SKILLS / "doc_ingestor" / "scripts" / "fastapi_parser.py", "_docagent_fp_parser", force_reload=True)
+_doc_gen = _load_mod(_SKILLS / "doc_generator" / "scripts" / "main.py", "_docagent_doc_gen")
+_drift = _load_mod(_SKILLS / "drift_detector" / "scripts" / "main.py", "_docagent_drift")
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -181,7 +181,7 @@ def run_ingest(project_root: Path, source_type: str) -> dict[str, Any]:
     source_type = (source_type or "go").lower()
     if source_type == "fastapi":
         # Reload on every call so file edits take effect without server restart
-        fp = _load_mod(_SKILLS / "doc_ingestor" / "fastapi_parser.py", "_docagent_fp_parser", force_reload=True)
+        fp = _load_mod(_SKILLS / "doc_ingestor" / "scripts" / "fastapi_parser.py", "_docagent_fp_parser", force_reload=True)
         parsed = fp.parse_fastapi_project(project_root)
     else:
         parsed = _go_parser.parse_project(project_root)
