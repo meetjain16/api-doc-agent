@@ -7,12 +7,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from parser import parse_project, scan_go_files
+from parser import parse_project, scan_source_files
 
+
+import argparse
+import os
 
 PROJECT_NAME = "API DocAgent"
-SOURCE_REPO = "sample_api_go"
+SOURCE_REPO = os.getenv("SOURCE_REPO", "sample_api_go")
 OUTPUT_FILE = "ingest.json"
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="API DocAgent ingestor")
+    parser.add_argument("--source-repo", dest="source_repo", help="Local source folder containing Go service (overrides SOURCE_REPO env)")
+    return parser.parse_args()
 
 
 def endpoint_confidence(endpoint: dict[str, Any]) -> float:
@@ -31,7 +40,7 @@ def endpoint_confidence(endpoint: dict[str, Any]) -> float:
 def build_ingestion_payload(project_root: Path) -> tuple[dict[str, Any], int]:
     """Parse the Go sample app and wrap the result in standardized metadata."""
     parsed = parse_project(project_root)
-    scanned_files = len(scan_go_files(project_root))
+    scanned_files = len(scan_source_files(project_root))
 
     endpoints = []
     for endpoint in parsed.get("endpoints", []):
@@ -67,8 +76,10 @@ def repo_root() -> Path:
 
 def main() -> None:
     """Run ingestion for sample_api_go and save output/ingest.json."""
+    args = _parse_args()
     root = repo_root()
-    project_root = root / SOURCE_REPO
+    source_repo = args.source_repo or os.getenv("SOURCE_REPO") or SOURCE_REPO
+    project_root = root / source_repo
     output_path = root / "output" / OUTPUT_FILE
 
     payload, scanned_files = build_ingestion_payload(project_root)

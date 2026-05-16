@@ -52,7 +52,7 @@ demonstrated end to end.
 From the repository root:
 
 ```bash
-cd /home/imart/api-doc-agent
+cd /home/imart/Desktop/Hackathon/10xproductivity/api-doc-agent
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -73,7 +73,7 @@ documentation from extracted metadata, but AI summaries will be limited.
 ## Run the Go Demo Service
 
 ```bash
-cd /home/imart/api-doc-agent/sample_api_go
+cd /home/imart/Desktop/Hackathon/10xproductivity/api-doc-agent/sample_api_go
 go run .
 ```
 
@@ -90,9 +90,25 @@ curl "http://localhost:8088/go/api/nsd/v1/fsa/GstSearch?empid=98123&AK=demo&gst=
 Run these commands from the project root:
 
 ```bash
-cd /home/imart/api-doc-agent
+cd /home/imart/Desktop/Hackathon/10xproductivity/api-doc-agent
 source venv/bin/activate
 ```
+
+### GitLab API import mode
+
+If you have a read-only GitLab token, you can import a repo directly without
+cloning it first:
+
+```bash
+python skills/gitlab_reader/main.py \
+   --base-url https://gitlab.com \
+   --project your-group/your-service \
+   --branch main \
+   --token <read-token> \
+   --target-dir sample_api_go
+```
+
+Then run the normal pipeline steps against the imported folder.
 
 ### 1. Ingest Go API Metadata
 
@@ -143,10 +159,13 @@ fields, response mismatches, deprecated fields, and missing endpoint docs.
 ## Launch the Dashboard
 
 ```bash
-cd /home/imart/api-doc-agent
+cd /home/imart/Desktop/Hackathon/10xproductivity/api-doc-agent
 source venv/bin/activate
 streamlit run streamlit_app/app.py
 ```
+
+The dashboard includes built-in pipeline controls in the sidebar, so you can
+run Step 1, Step 2, Step 3, or the full pipeline without leaving the app.
 
 Dashboard sections:
 
@@ -177,6 +196,15 @@ Dashboard sections:
 4. `drift_detector` compares generated schemas against stale Markdown docs.
 5. `streamlit_app` presents the full API intelligence workflow in a polished
    dashboard.
+
+## Supported Source Types
+
+The ingestor now auto-detects the project type:
+
+- Go services using Gin-style routing and Go structs
+- FastAPI services using route decorators and Pydantic models
+
+If a repo contains only Python sources, the FastAPI parser is used.
 
 ## Notes for Hackathon Judges
 

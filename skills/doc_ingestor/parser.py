@@ -12,6 +12,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+try:
+    from .fastapi_parser import parse_fastapi_project, scan_python_files
+except ImportError:
+    from fastapi_parser import parse_fastapi_project, scan_python_files
+
 
 IGNORED_DIRS = {"vendor", ".git", "cachefiles"}
 IGNORED_FILES = {"go.sum"}
@@ -49,6 +54,17 @@ def scan_go_files(project_root: str | Path) -> list[Path]:
             continue
         files.append(path)
     return sorted(files)
+
+
+def scan_source_files(project_root: str | Path) -> list[Path]:
+    """Return relevant Go or Python source files below a project root."""
+    root = Path(project_root)
+    if not root.exists():
+        return []
+
+    go_files = scan_go_files(root)
+    py_files = scan_python_files(root)
+    return sorted(go_files + py_files)
 
 
 def read_file(path: Path) -> str:
@@ -226,9 +242,15 @@ def enrich_endpoints(
 
 
 def parse_project(project_root: str | Path = "sample_api_go") -> dict[str, list[dict[str, Any]]]:
-    """Parse a Go API project and return route and struct metadata."""
+    """Parse a Go or FastAPI project and return route and struct metadata."""
     root = Path(project_root)
+
     go_files = scan_go_files(root)
+    py_files = scan_python_files(root)
+
+    if py_files and not go_files:
+        return parse_fastapi_project(root)
+
     structs = parse_structs(go_files, root)
     handlers = parse_handler_comments(go_files, root)
     endpoints = parse_routes(go_files, root)

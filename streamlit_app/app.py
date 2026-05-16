@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import re
+import sys
 from pathlib import Path
 from typing import Any
 
 import streamlit as st
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 
 PAGE_TITLE = "API DocAgent — AI-Powered API Intelligence Platform"
@@ -22,15 +30,46 @@ def output_dir() -> Path:
     return repo_root() / "output"
 
 
-def artifact_paths() -> dict[str, Path]:
-    """Centralize all dashboard artifact paths."""
+def load_repos_config() -> list[dict[str, Any]]:
+    """Load repo list from repos.yaml at the project root."""
+    if yaml is None:
+        return []
+    config_path = repo_root() / "repos.yaml"
+    if not config_path.exists():
+        return []
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            config = yaml.safe_load(fh)
+        return config.get("repos", []) if isinstance(config, dict) else []
+    except Exception:
+        return []
+
+
+def repo_slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+@st.cache_resource(show_spinner=False)
+def _get_runner() -> Any:
+    """Load the pipeline runner module once and cache it for the session."""
+    runner_path = repo_root() / "skills" / "pipeline" / "runner.py"
+    spec = importlib.util.spec_from_file_location("_api_docagent_runner", runner_path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_api_docagent_runner"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def artifact_paths(slug: str | None = None) -> dict[str, Path]:
+    """Return artifact paths for the selected repo (or the default Go sample)."""
     out = output_dir()
+    base = out / "repos" / slug if slug else out
     return {
-        "ingest": out / "ingest.json",
-        "generated_docs_json": out / "generated_docs.json",
-        "generated_docs_md": out / "generated_docs.md",
-        "breaking_changes_json": out / "breaking_changes.json",
-        "breaking_changes_md": out / "breaking_changes.md",
+        "ingest": base / "ingest.json",
+        "generated_docs_json": base / "generated_docs.json",
+        "generated_docs_md": base / "generated_docs.md",
+        "breaking_changes_json": base / "breaking_changes.json",
+        "breaking_changes_md": base / "breaking_changes.md",
     }
 
 
@@ -56,9 +95,9 @@ def load_text(path_text: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def load_artifacts() -> dict[str, Any]:
-    """Load all known API DocAgent outputs."""
-    paths = artifact_paths()
+def load_artifacts(slug: str | None = None) -> dict[str, Any]:
+    """Load all API DocAgent outputs for the given repo slug (or default Go sample)."""
+    paths = artifact_paths(slug)
     return {
         "paths": paths,
         "ingest": load_json(str(paths["ingest"])),
@@ -253,9 +292,138 @@ def artifact_status(paths: dict[str, Path]) -> list[str]:
     return [name for name, path in paths.items() if not path.exists()]
 
 
-def render_sidebar(paths: dict[str, Path]) -> str:
-    """Render sidebar navigation and artifact health."""
+def pipeline_commands() -> list[tuple[str, list[str]]]:
+    """Return the dashboard-executable pipeline commands in order."""
+    root = repo_root()
+    python = sys.executable
+    return [
+        ("Step 1 — Parse Go source", [python, str(root / "skills" / "doc_ingestor" / "main.py")]),
+        ("Step 2 — Generate AI docs", [python, str(root / "skills" / "doc_generator" / "main.py")]),
+        ("Step 3 — Detect drift", [python, str(root / "skills" / "drift_detector" / "main.py")]),
+    ]
+
+
+def run_pipeline_command(label: str, command: list[str]) -> dict[str, Any]:
+    """Run one pipeline command and return its execution details."""
+    completed = subprocess.run(
+        command,
+        cwd=repo_root(),
+        capture_output=True,
+        text=True,
+    )
+
+    return {
+        "label": label,
+        "command": command,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+    }
+
+
+def run_pipeline_steps(step_indexes: list[int] | None = None) -> list[dict[str, Any]]:
+    """Execute one or more pipeline steps and refresh cached artifacts."""
+    commands = pipeline_commands()
+    indexes = step_indexes if step_indexes is not None else list(range(len(commands)))
+    results: list[dict[str, Any]] = []
+
+    with st.spinner("Running pipeline..."):
+        for index in indexes:
+            label, command = commands[index]
+            results.append(run_pipeline_command(label, command))
+
+    load_json.clear()
+    load_text.clear()
+    st.session_state["pipeline_results"] = results
+    st.rerun()
+
+
+def render_pipeline_results() -> None:
+    """Show the latest dashboard-triggered pipeline run."""
+    results = st.session_state.get("pipeline_results", [])
+    if not results:
+        return
+
+    st.sidebar.divider()
+    st.sidebar.subheader("Latest Pipeline Run")
+    for result in results:
+        status = "OK" if result.get("returncode") == 0 else f"Exit {result.get('returncode')}"
+        st.sidebar.caption(f"{result.get('label')}: {status}")
+
+    with st.expander("Pipeline run details", expanded=False):
+        for result in results:
+            status = "OK" if result.get("returncode") == 0 else f"Exit {result.get('returncode')}"
+            st.markdown(f"#### {result.get('label')} — {status}")
+            st.code(" ".join(result.get("command", [])), language="bash")
+            if result.get("stdout"):
+                st.markdown("**Stdout**")
+                st.code(result["stdout"], language="text")
+            if result.get("stderr"):
+                st.markdown("**Stderr**")
+                st.code(result["stderr"], language="text")
+
+
+def render_pipeline_controls(selected_repo: dict[str, Any] | None) -> None:
+    """Render Run Pipeline button for the currently selected repo."""
+    if not selected_repo:
+        st.sidebar.caption("Select a configured repo above to run its pipeline.")
+        if st.sidebar.button("Run Go sample (all steps)", use_container_width=True):
+            run_pipeline_steps()
+        return
+
+    desc = selected_repo.get("description", "")
+    if desc:
+        st.sidebar.caption(desc)
+
+    if st.sidebar.button("Run Pipeline", type="primary", use_container_width=True):
+        with st.spinner(f"Running pipeline for {selected_repo['name']}..."):
+            try:
+                _get_runner.clear()  # force fresh module load on each run
+                runner = _get_runner()
+                result = runner.run_by_name(selected_repo["name"])
+                if result.get("status") == "OK":
+                    st.sidebar.success(
+                        f"Done — {result.get('docs_generated', 0)} endpoints documented."
+                    )
+                    load_json.clear()
+                    load_text.clear()
+                    st.session_state["_active_slug"] = repo_slug(selected_repo["name"])
+                    st.rerun()
+                else:
+                    st.sidebar.error(
+                        f"Failed at {result.get('stage', '?')}: {result.get('error', 'unknown')}"
+                    )
+            except Exception as exc:
+                st.sidebar.error(f"Pipeline error: {exc}")
+
+
+def render_sidebar(repos: list[dict[str, Any]]) -> tuple[str, str | None]:
+    """Render sidebar navigation, repo selector, and pipeline runner. Returns (page, slug)."""
     st.sidebar.title("API DocAgent")
+
+    # Repo selector
+    selected_slug: str | None = st.session_state.get("_active_slug")
+    selected_repo: dict[str, Any] | None = None
+
+    if repos:
+        options = ["[Sample Go Service]"] + [r["name"] for r in repos]
+        default_idx = 0
+        if selected_slug:
+            for i, r in enumerate(repos):
+                if repo_slug(r["name"]) == selected_slug:
+                    default_idx = i + 1
+                    break
+        choice = st.sidebar.selectbox("Repository", options, index=default_idx)
+        if choice != "[Sample Go Service]":
+            selected_slug = repo_slug(choice)
+            selected_repo = next((r for r in repos if r["name"] == choice), None)
+        else:
+            selected_slug = None
+        st.session_state["_active_slug"] = selected_slug
+
+    st.sidebar.subheader("Run Pipeline")
+    render_pipeline_controls(selected_repo)
+
     page = st.sidebar.radio(
         "Navigate",
         [
@@ -268,11 +436,12 @@ def render_sidebar(paths: dict[str, Path]) -> str:
 
     st.sidebar.divider()
     st.sidebar.subheader("Artifact Status")
+    paths = artifact_paths(selected_slug)
     for name, path in paths.items():
-        status = "Ready" if path.exists() else "Missing"
-        st.sidebar.caption(f"{name}: {status}")
+        icon = "✓" if path.exists() else "○"
+        st.sidebar.caption(f"{icon} {name}")
 
-    return page
+    return page, selected_slug
 
 
 def as_list(value: Any) -> list[Any]:
@@ -480,7 +649,7 @@ def render_overview(artifacts: dict[str, Any]) -> None:
                 "status": "Ready" if artifacts.get("breaking_changes") else "Missing",
             },
         ]
-        st.dataframe(snapshot, hide_index=True, use_container_width=True)
+        st.dataframe(snapshot, hide_index=True, width='stretch')
 
     with right:
         st.markdown("#### Demo Signal")
@@ -515,7 +684,7 @@ def render_api_explorer(artifacts: dict[str, Any]) -> None:
 
     filtered = filter_endpoints(endpoints, search, selected_methods)
     st.caption(f"Showing {len(filtered)} of {len(endpoints)} endpoints")
-    st.dataframe(endpoint_rows(filtered), hide_index=True, use_container_width=True)
+    st.dataframe(endpoint_rows(filtered), hide_index=True, width='stretch')
 
     with st.expander("Endpoint details"):
         for endpoint in filtered:
@@ -576,10 +745,10 @@ def render_generated_docs(artifacts: dict[str, Any]) -> None:
     left, right = st.columns(2)
     with left:
         st.markdown("#### Request Fields")
-        st.dataframe(field_rows(endpoint.get("request_fields", [])), hide_index=True, use_container_width=True)
+        st.dataframe(field_rows(endpoint.get("request_fields", [])), hide_index=True, width='stretch')
     with right:
         st.markdown("#### Response Fields")
-        st.dataframe(field_rows(endpoint.get("response_fields", [])), hide_index=True, use_container_width=True)
+        st.dataframe(field_rows(endpoint.get("response_fields", [])), hide_index=True, width='stretch')
 
     render_notes("Validation Notes", sections.get("validation_notes"))
     render_notes("Edge Cases", sections.get("edge_cases"))
@@ -647,14 +816,14 @@ def render_drift_dashboard(artifacts: dict[str, Any]) -> None:
     st.markdown("### Drift Categories")
     tabs = st.tabs(["Removed Fields", "Renamed Fields", "Undocumented Fields"])
     with tabs[0]:
-        st.dataframe(issue_rows(issues, {"REMOVED_FIELD"}), hide_index=True, use_container_width=True)
+        st.dataframe(issue_rows(issues, {"REMOVED_FIELD"}), hide_index=True, width='stretch')
     with tabs[1]:
-        st.dataframe(issue_rows(issues, {"POSSIBLE_RENAMED_FIELD"}), hide_index=True, use_container_width=True)
+        st.dataframe(issue_rows(issues, {"POSSIBLE_RENAMED_FIELD"}), hide_index=True, width='stretch')
     with tabs[2]:
         st.dataframe(
             issue_rows(issues, {"UNDOCUMENTED_RESPONSE_FIELD", "UNDOCUMENTED_QUERY_OR_REQUEST_FIELD"}),
             hide_index=True,
-            use_container_width=True,
+            width='stretch',
         )
 
     with st.expander("PR-style engineering alerts", expanded=True):
@@ -678,11 +847,14 @@ def render_drift_dashboard(artifacts: dict[str, Any]) -> None:
 def main() -> None:
     """Run the Streamlit app."""
     configure_page()
-    artifacts = load_artifacts()
+    repos = load_repos_config()
+    page, selected_slug = render_sidebar(repos)
+
+    artifacts = load_artifacts(selected_slug)
     paths = artifacts["paths"]
-    page = render_sidebar(paths)
 
     render_header()
+    render_pipeline_results()
     render_missing_artifacts(artifact_status(paths))
 
     if page == "Overview Dashboard":

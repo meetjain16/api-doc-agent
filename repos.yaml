@@ -1,0 +1,23 @@
+# API DocAgent Repository Configuration
+# 
+# Store your GitLab/SCM repos here. The dashboard will load these at runtime.
+# Credentials are stored locally and never logged or sent to external services.
+#
+# Example:
+# repos:
+#   - name: "Product Search API"
+#     base_url: "https://scm.intermesh.net"
+#     project: "indiamart/search/product-search-screen"
+#     branch: "main"
+#     token: "YOUR_READ_TOKEN_HERE"
+#     source_type: "fastapi"  # or "go"
+#     description: "Search service APIs"
+
+repos:
+  - name: "Product Search API"
+    base_url: "https://scm.intermesh.net"
+    project: "indiamart/search/product-search-screen"
+    branch: "development"
+    token: "qV1P1djs1CaxfJHvTQmY"
+    source_type: "fastapi"
+    description: "Product search service with routers folder"
