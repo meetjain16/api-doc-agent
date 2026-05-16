@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-anthropic
+openai
 python-dotenv
 pydantic
 pyyaml

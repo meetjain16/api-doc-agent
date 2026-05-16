@@ -1,8 +1,11 @@
-"""Anthropic Claude client for API DocAgent.
+"""LLM client for API DocAgent.
 
-Drop-in replacement for the original OpenAI client.
+Uses the OpenAI-compatible SDK pointed at the org proxy (imllm.intermesh.net).
 Exposes the same public interface: generate_text() and generate_json().
-Falls back to deterministic metadata-derived docs if no key is set.
+All config is read from .env:
+  LLM_BASE_URL  — proxy endpoint, e.g. https://imllm.intermesh.net/v1
+  LLM_API_KEY   — org API key
+  LLM_MODEL     — model name, e.g. anthropic/claude-haiku-4-5
 """
 
 from __future__ import annotations
@@ -20,12 +23,13 @@ except ImportError:
     load_dotenv = None  # type: ignore[assignment]
 
 try:
-    import anthropic as _anthropic
+    from openai import OpenAI as _OpenAI
 except ImportError:
-    _anthropic = None  # type: ignore[assignment]
+    _OpenAI = None  # type: ignore[assignment]
 
 
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_MODEL = "anthropic/claude-haiku-4-5"
+DEFAULT_BASE_URL = "https://imllm.intermesh.net/v1"
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_MAX_TOKENS = 1024
 
@@ -72,57 +76,56 @@ def _get_client() -> Any:
     if _client is not None:
         return _client
     _load_environment()
-    if _anthropic is None:
-        raise RuntimeError("anthropic SDK not installed. Run: pip install anthropic")
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if _OpenAI is None:
+        raise RuntimeError("openai SDK not installed. Run: pip install openai")
+    api_key = os.getenv("LLM_API_KEY")
+    base_url = os.getenv("LLM_BASE_URL", DEFAULT_BASE_URL)
     if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is missing. Add it to .env or your shell environment.")
-    _client = _anthropic.Anthropic(api_key=api_key)
+        raise RuntimeError("LLM_API_KEY is missing. Add it to .env.")
+    _client = _OpenAI(api_key=api_key, base_url=base_url)
     return _client
 
 
 def _is_auth_error(exc: Exception) -> bool:
-    """Return True for authentication errors that should not be retried."""
     msg = str(exc).lower()
     return "401" in msg or "authentication" in msg or "invalid api key" in msg or "permission" in msg
 
 
 def _chat(prompt: str, system_prompt: str) -> str:
     _load_environment()
-    if _anthropic is None:
-        raise RuntimeError("anthropic SDK not installed. Run: pip install anthropic")
+    if _OpenAI is None:
+        raise RuntimeError("openai SDK not installed. Run: pip install openai")
 
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key or api_key == "your_key_here":
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY not set. Add it to .env:\n  ANTHROPIC_API_KEY=sk-ant-..."
-        )
+    api_key = os.getenv("LLM_API_KEY")
+    if not api_key:
+        raise RuntimeError("LLM_API_KEY not set. Add it to .env.")
 
-    model = os.getenv("ANTHROPIC_MODEL", DEFAULT_MODEL)
+    model = os.getenv("LLM_MODEL", DEFAULT_MODEL)
     max_retries = DEFAULT_MAX_RETRIES
 
     for attempt in range(1, max_retries + 2):
         try:
             client = _get_client()
-            response = client.messages.create(
+            response = client.chat.completions.create(
                 model=model,
                 max_tokens=DEFAULT_MAX_TOKENS,
-                system=system_prompt,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
             )
-            text = response.content[0].text if response.content else ""
-            logger.info("Claude response generated (model=%s)", model)
+            text = response.choices[0].message.content or ""
+            logger.info("LLM response generated (model=%s)", model)
             return text.strip()
         except Exception as exc:
-            # Never retry auth errors — they will not resolve with more attempts
             if _is_auth_error(exc):
-                logger.error("Authentication failed — check ANTHROPIC_API_KEY in .env: %s", exc)
+                logger.error("Authentication failed — check LLM_API_KEY in .env: %s", exc)
                 raise
             if attempt > max_retries:
-                logger.error("Claude request failed after %d attempts: %s", attempt, exc)
+                logger.error("LLM request failed after %d attempts: %s", attempt, exc)
                 raise
             sleep = min(0.5 * attempt, 2.0)
-            logger.warning("Claude attempt %d/%d failed; retrying in %.1fs: %s", attempt, max_retries + 1, sleep, exc)
+            logger.warning("LLM attempt %d/%d failed; retrying in %.1fs: %s", attempt, max_retries + 1, sleep, exc)
             time.sleep(sleep)
 
     return ""
@@ -154,7 +157,6 @@ def generate_json(prompt: str) -> dict[str, Any]:
                 "markdown fences, no prose, and no comments."
             ),
         )
-        # Strip accidental markdown fences the model might add
         cleaned = raw_content.strip()
         if cleaned.startswith("```"):
             lines = cleaned.splitlines()
