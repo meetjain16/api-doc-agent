@@ -178,32 +178,110 @@ def _build_markdown(report: dict[str, Any]) -> str:
     return f"{pr_report}\n\n---\n\n{summary}\n"
 
 
+def _self_analysis(generated_docs: dict[str, Any]) -> dict[str, Any]:
+    """Analyse generated_docs.json without stale docs.
+
+    Flags: AI fallback endpoints, undocumented query params, missing request/response fields.
+    """
+    from comparator import (
+        _actual_request_fields, _actual_response_fields,
+        _score_endpoint_severity, _issue, _dedupe_issues,
+    )
+
+    results: list[dict[str, Any]] = []
+    for endpoint in generated_docs.get("endpoints", []):
+        path = str(endpoint.get("path", "")).strip()
+        if not path:
+            continue
+        issues: list[dict[str, Any]] = []
+        ai_sections = endpoint.get("ai_sections", {})
+        status = ai_sections.get("generation_status", "fallback")
+
+        if status == "fallback":
+            issues.append(_issue(
+                "NO_AI_DOCUMENTATION", path,
+                severity="HIGH",
+                detail="AI documentation was not generated. Add a valid LLM key and re-run the pipeline.",
+            ))
+
+        for param in endpoint.get("query_params", []):
+            issues.append(_issue(
+                "UNDOCUMENTED_QUERY_OR_REQUEST_FIELD", str(param),
+                severity="LOW",
+                detail="Query parameter found in source code with no documentation.",
+            ))
+
+        req_fields = _actual_request_fields(endpoint)
+        resp_fields = _actual_response_fields(endpoint)
+
+        if not req_fields and not resp_fields and endpoint.get("confidence", 0) >= 0.7:
+            issues.append(_issue(
+                "MISSING_SCHEMA", path,
+                severity="MEDIUM",
+                detail="No request or response fields resolved — structs may be in external packages.",
+            ))
+
+        issues = _dedupe_issues(issues)
+        results.append({
+            "endpoint": path,
+            "method": endpoint.get("method", ""),
+            "severity": _score_endpoint_severity(issues),
+            "documented_request_fields": [],
+            "documented_response_fields": [],
+            "generated_request_fields": req_fields,
+            "generated_response_fields": resp_fields,
+            "issues": issues,
+        })
+
+    return {
+        "metadata": {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "mode": "self-analysis (no stale docs)",
+            "endpoints_compared": len(results),
+            "high_severity_endpoints": sum(1 for r in results if r["severity"] == "HIGH"),
+        },
+        "results": results,
+    }
+
+
 def run_drift_detection(
     generated_docs_path: Path | None = None,
     stale_docs_path: Path | None = None,
     output_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Run drift detection and save JSON/Markdown artifacts."""
+    """Run drift detection and save JSON/Markdown artifacts.
+
+    When no stale_docs_path is provided (or the file doesn't exist), runs
+    self-analysis mode: flags AI failures, undocumented params, and missing schemas.
+    """
     generated_path = generated_docs_path or _default_generated_docs_path()
-    stale_path = stale_docs_path or _default_stale_docs_path()
     target_dir = output_dir or _default_output_dir()
     json_output_path = target_dir / "breaking_changes.json"
     markdown_output_path = target_dir / "breaking_changes.md"
 
-    missing = _missing_files([generated_path, stale_path])
-    if missing:
-        logger.error("Drift detection skipped; missing files: %s", ", ".join(missing))
-        payload = _build_failure_payload(missing)
+    missing_generated = _missing_files([generated_path])
+    if missing_generated:
+        logger.error("Drift detection skipped; missing: %s", missing_generated)
+        payload = _build_failure_payload(missing_generated)
         _write_json(json_output_path, payload)
         _write_markdown(markdown_output_path, _failure_markdown(payload))
         return payload
 
-    logger.info("Running drift comparison")
-    drift_results = compare_drift(generated_docs_path=generated_path, stale_docs_path=stale_path)
+    # ── Stale-docs mode vs self-analysis mode ────────────────────
+    stale_path = stale_docs_path if stale_docs_path and stale_docs_path.exists() else None
+
+    if stale_path:
+        logger.info("Running drift comparison against stale docs: %s", stale_path)
+        drift_results = compare_drift(generated_docs_path=generated_path, stale_docs_path=stale_path)
+    else:
+        logger.info("No stale docs found — running self-analysis mode")
+        import json as _json
+        generated_docs = _json.loads(generated_path.read_text(encoding="utf-8"))
+        drift_results = _self_analysis(generated_docs)
 
     logger.info("Generating human-readable drift report")
     report = generate_report(drift_results)
-    payload = _build_success_payload(drift_results, report, generated_path, stale_path)
+    payload = _build_success_payload(drift_results, report, generated_path, stale_path or Path("(self-analysis)"))
 
     _write_json(json_output_path, payload)
     _write_markdown(markdown_output_path, _build_markdown(report))
